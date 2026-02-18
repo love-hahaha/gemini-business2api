@@ -342,7 +342,7 @@ const isApiInfoOpen = ref(false)
 const menuItems = [
   {
     path: '/',
-    label: '概览',
+    label: '概览中心',
     icon: 'M4 4h7v7H4V4zm9 0h7v4h-7V4zm0 6h7v10h-7V10zM4 13h7v7H4v-7z',
   },
   {
@@ -367,30 +367,30 @@ const menuItems = [
           },
           {
             path: '/docs',
-            label: '文档中心',
+            label: '文档教程',
             icon: 'M6 3h9l4 4v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm8 1.5V8h3.5L14 4.5zM8 11h8v2H8v-2zm0 4h8v2H8v-2z',
           },
         ]
 
 const currentPageTitle = computed(() => {
   const item = menuItems.find(item => item.path === route.path)
-  return item?.label || '概览'
+  return item?.label || '概览中心'
 })
 
 const navItemClass = (path: string) => {
   const baseLayout = isSidebarCollapsed.value ? 'px-2 justify-center gap-0' : 'px-3 gap-3'
-  const base = `transition-colors ${baseLayout}`
+  const base = `transition-all ${baseLayout}`
   if (route.path === path) {
-    return `${base} bg-primary text-primary-foreground`
+    return `${base} bg-accent text-foreground`
   }
-  return `${base} text-muted-foreground hover:bg-accent hover:text-accent-foreground`
+  return `${base} text-muted-foreground hover:bg-accent/50 hover:text-foreground`
 }
 
 const navIconClass = (path: string) => {
   if (route.path === path) {
-    return 'bg-primary-foreground/15 text-primary-foreground border-primary-foreground/40'
+    return 'bg-primary/15 text-primary border-primary/30'
   }
-  return 'bg-secondary text-muted-foreground group-hover:text-accent-foreground'
+  return 'bg-secondary text-muted-foreground group-hover:text-foreground group-hover:border-primary/20'
 }
 
 

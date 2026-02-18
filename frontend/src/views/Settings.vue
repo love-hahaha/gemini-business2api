@@ -27,12 +27,15 @@
             <div class="rounded-2xl border border-border bg-card p-4">
               <p class="text-xs uppercase tracking-[0.3em] text-muted-foreground">基础</p>
               <div class="mt-4 space-y-3">
-                <label class="block text-xs text-muted-foreground">API 密钥</label>
+                <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <label class="block">API 密钥</label>
+                  <HelpTip text="支持多个密钥，用逗号分隔。例如: key1,key2,key3" />
+                </div>
                 <input
                   v-model="localSettings.basic.api_key"
                   type="text"
                   class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
-                  placeholder="可选"
+                  placeholder="可选，多个密钥用逗号分隔"
                 />
                 <label class="block text-xs text-muted-foreground">基础地址</label>
                 <input
@@ -61,54 +64,30 @@
                   class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
                   placeholder="http://127.0.0.1:7890 | no_proxy=localhost,127.0.0.1"
                 />
-                <div class="rounded-2xl border border-border/60 bg-muted/30 px-3 py-2.5 text-xs text-muted-foreground">
-                  <p class="mb-2 font-medium">格式示例：</p>
-                  <div class="space-y-1.5">
-                    <div>
-                      <p class="text-[10px] text-muted-foreground/70 mb-0.5">基础格式：</p>
-                      <p class="font-mono text-[11px] leading-relaxed">http://127.0.0.1:7890</p>
-                    </div>
-                    <div>
-                      <p class="text-[10px] text-muted-foreground/70 mb-0.5">带认证：</p>
-                      <p class="font-mono text-[11px] leading-relaxed">http://user:pass@127.0.0.1:7890</p>
-                    </div>
-                    <div>
-                      <p class="text-[10px] text-muted-foreground/70 mb-0.5">SOCKS5 + NO_PROXY：</p>
-                      <p class="font-mono text-[11px] leading-relaxed break-all">socks5h://127.0.0.1:7890 | no_proxy=localhost,127.0.0.1,.local</p>
-                    </div>
-                    <div>
-                      <p class="text-[10px] text-muted-foreground/70 mb-0.5">完整示例：</p>
-                      <p class="font-mono text-[11px] leading-relaxed break-all">socks5h://user:pass@127.0.0.1:7890 | no_proxy=localhost,127.0.0.1,.local</p>
-                    </div>
-                  </div>
-                </div>
               </div>
             </div>
 
             <div class="rounded-2xl border border-border bg-card p-4">
               <p class="text-xs uppercase tracking-[0.3em] text-muted-foreground">重试</p>
               <div class="mt-4 grid grid-cols-2 gap-3 text-sm">
-                <label class="col-span-2 text-xs text-muted-foreground">新会话尝试次数</label>
-                <input v-model.number="localSettings.retry.max_new_session_tries" type="number" min="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
-
-                <label class="col-span-2 text-xs text-muted-foreground">请求重试次数</label>
-                <input v-model.number="localSettings.retry.max_request_retries" type="number" min="0" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
-
-                <label class="col-span-2 text-xs text-muted-foreground">账号切换次数</label>
+                <label class="col-span-2 text-xs text-muted-foreground">账户切换次数</label>
                 <input v-model.number="localSettings.retry.max_account_switch_tries" type="number" min="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
 
-                <label class="col-span-2 text-xs text-muted-foreground">失败阈值</label>
-                <input v-model.number="localSettings.retry.account_failure_threshold" type="number" min="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
+                <label class="col-span-2 text-xs text-muted-foreground">对话冷却（小时）</label>
+                <input v-model.number="textRateLimitCooldownHours" type="number" min="1" max="24" step="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
 
-                <label class="col-span-2 text-xs text-muted-foreground">限流冷却（小时）</label>
-                <input v-model.number="rateLimitCooldownHours" type="number" min="1" max="12" step="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
+                <label class="col-span-2 text-xs text-muted-foreground">绘图冷却（小时）</label>
+                <input v-model.number="imagesRateLimitCooldownHours" type="number" min="1" max="24" step="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
+
+                <label class="col-span-2 text-xs text-muted-foreground">视频冷却（小时）</label>
+                <input v-model.number="videosRateLimitCooldownHours" type="number" min="1" max="24" step="1" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
 
                 <label class="col-span-2 text-xs text-muted-foreground">会话缓存秒数</label>
                 <input v-model.number="localSettings.retry.session_cache_ttl_seconds" type="number" min="0" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
 
                 <div class="col-span-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                  <span>自动刷新账号间隔（秒，0禁用）</span>
-                  <HelpTip text="仅在数据库存储启用时生效：用于检测账号配置变化并重载列表，不会刷新 cookie。文件存储模式不会触发。" />
+                  <span>自动刷新账号间隔（秒，0=关闭）</span>
+                  <HelpTip text="仅在数据库存储启用时生效：用于检测账号配置变化并重载列表，不会刷新 Cookie。" />
                 </div>
                 <input v-model.number="localSettings.retry.auto_refresh_accounts_seconds" type="number" min="0" max="600" class="col-span-2 rounded-2xl border border-input bg-background px-3 py-2" />
               </div>
@@ -120,13 +99,11 @@
             <div class="rounded-2xl border border-border bg-card p-4">
               <p class="text-xs uppercase tracking-[0.3em] text-muted-foreground">自动注册/刷新</p>
               <div class="mt-4 space-y-3">
-                <div class="grid grid-cols-2 items-center gap-x-6 gap-y-2">
-                  <div class="flex items-center justify-start gap-2">
-                    <Checkbox v-model="localSettings.basic.browser_headless">
-                      无头浏览器
-                    </Checkbox>
-                    <HelpTip text="无头模式适用于服务器环境（如 Docker）。若注册/刷新失败，建议关闭。" />
-                  </div>
+                <div class="flex items-center justify-between gap-2">
+                  <Checkbox v-model="localSettings.basic.browser_headless">
+                    无头浏览器
+                  </Checkbox>
+                  <HelpTip text="无头模式适用于服务器环境（如 Docker）。若注册/刷新失败，建议关闭。" />
                 </div>
                 <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
                   <span>浏览器引擎</span>
@@ -254,7 +231,7 @@
                     class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
                     placeholder="X-API-Key"
                   />
-                  <label class="block text-xs text-muted-foreground">GPTMail 邮箱域名（可选）</label>
+                  <label class="block text-xs text-muted-foreground">GPTMail 邮箱域名（可选，不带@）</label>
                   <input
                     v-model="localSettings.basic.gptmail_domain"
                     type="text"
@@ -276,7 +253,10 @@
 
           <div class="space-y-4">
             <div class="rounded-2xl border border-border bg-card p-4">
-              <p class="text-xs uppercase tracking-[0.3em] text-muted-foreground">图像生成</p>
+              <div class="flex items-center justify-between gap-2">
+                <p class="text-xs uppercase tracking-[0.3em] text-muted-foreground">图像生成</p>
+                <HelpTip text="不建议开启图像生成功能，容易思考不出图，建议用gemini-imagen" />
+              </div>
               <div class="mt-4 space-y-3">
                 <Checkbox v-model="localSettings.image_generation.enabled">
                   启用图像生成
@@ -376,23 +356,44 @@ const isSaving = ref(false)
 const errorMessage = ref('')
 
 // 429冷却时间：小时 ↔ 秒 的转换
-const rateLimitCooldownHours = computed({
-  get: () => {
-    if (!localSettings.value?.retry?.rate_limit_cooldown_seconds) return 1
-    const seconds = localSettings.value.retry.rate_limit_cooldown_seconds
-    const hours = Math.round(seconds / 3600)
-    return hours < 1 || hours > 12 ? 1 : hours
-  },
+const DEFAULT_COOLDOWN_HOURS = {
+  text: 2,
+  images: 4,
+  videos: 4
+} as const
+
+const toCooldownHours = (seconds: number | undefined, fallbackHours: number) => {
+  if (!seconds) return fallbackHours
+  return Math.max(1, Math.round(seconds / 3600))
+}
+
+const createCooldownHours = (
+  key: 'text_rate_limit_cooldown_seconds' | 'images_rate_limit_cooldown_seconds' | 'videos_rate_limit_cooldown_seconds',
+  fallbackHours: number
+) => computed({
+  get: () => toCooldownHours(localSettings.value?.retry?.[key], fallbackHours),
   set: (hours: number) => {
     if (localSettings.value?.retry) {
-      localSettings.value.retry.rate_limit_cooldown_seconds = hours * 3600
+      localSettings.value.retry[key] = hours * 3600
     }
   }
 })
 
+const textRateLimitCooldownHours = createCooldownHours(
+  'text_rate_limit_cooldown_seconds',
+  DEFAULT_COOLDOWN_HOURS.text
+)
+const imagesRateLimitCooldownHours = createCooldownHours(
+  'images_rate_limit_cooldown_seconds',
+  DEFAULT_COOLDOWN_HOURS.images
+)
+const videosRateLimitCooldownHours = createCooldownHours(
+  'videos_rate_limit_cooldown_seconds',
+  DEFAULT_COOLDOWN_HOURS.videos
+)
+
 const browserEngineOptions = [
-  { label: 'UC - 支持无头/有头', value: 'uc' },
-  { label: 'DP - 支持无头/有头（推荐）', value: 'dp' },
+  { label: 'DP - 支持无头/有头', value: 'dp' },
 ]
 const tempMailProviderOptions = mailProviderOptions
 const imageOutputOptions = [

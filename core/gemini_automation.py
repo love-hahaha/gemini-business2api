@@ -2,6 +2,7 @@
 Gemini自动化登录模块（用于新账号注册）
 """
 import os
+import json
 import random
 import string
 import time
@@ -52,6 +53,7 @@ class GeminiAutomation:
         self.log_callback = log_callback
         self._page = None
         self._user_data_dir = None
+        self._last_send_error = ""
 
     def stop(self) -> None:
         """外部请求停止：尽力关闭浏览器实例。"""
@@ -95,7 +97,6 @@ class GeminiAutomation:
         chromium_path = _find_chromium_path()
         if chromium_path:
             options.set_browser_path(chromium_path)
-            self._log("info", f"using browser: {chromium_path}")
 
         options.set_argument("--incognito")
         options.set_argument("--no-sandbox")
@@ -160,19 +161,19 @@ class GeminiAutomation:
     def _run_flow(self, page, email: str, mail_client) -> dict:
         """执行登录流程"""
 
-        # 记录开始时间，用于邮件时间过滤
+        # 记录任务开始时间，用于邮件时间过滤（全流程固定，不随重发更新）
         from datetime import datetime
-        send_time = datetime.now()
+        task_start_time = datetime.now()
 
         # Step 1: 导航到首页并设置 Cookie
-        self._log("info", f"🌐 正在打开登录页面: {email}")
+        self._log("info", f"🌐 打开登录页面: {email}")
 
         page.get(AUTH_HOME_URL, timeout=self.timeout)
         time.sleep(2)
 
         # 设置两个关键 Cookie
         try:
-            self._log("info", "🍪 正在设置认证 Cookies...")
+            self._log("info", "🍪 设置认证 Cookies...")
             page.set.cookies({
                 "name": "__Host-AP_SignInXsrf",
                 "value": DEFAULT_XSRF_TOKEN,
@@ -188,13 +189,23 @@ class GeminiAutomation:
                 "path": "/",
                 "secure": True,
             })
-            self._log("info", "✅ Cookies 设置成功")
         except Exception as e:
-            self._log("warning", f"⚠️ 设置 Cookies 失败: {e}")
+            self._log("warning", f"⚠️ Cookie 设置失败: {e}")
 
         login_hint = quote(email, safe="")
         login_url = f"https://auth.business.gemini.google/login/email?continueUrl=https%3A%2F%2Fbusiness.gemini.google%2F&loginHint={login_hint}&xsrfToken={DEFAULT_XSRF_TOKEN}"
-        self._log("info", "🔗 正在访问登录链接...")
+
+        # 提前启动网络监听，捕获默认发送
+        try:
+            page.listen.start(
+                targets=["batchexecute", "browserinfo", "verify-oob-code"],
+                is_regex=False,
+                method=("GET", "POST"),
+                res_type=("XHR", "FETCH", "DOCUMENT"),
+            )
+        except Exception:
+            pass
+
         page.get(login_url, timeout=self.timeout)
         time.sleep(5)
 
@@ -204,37 +215,42 @@ class GeminiAutomation:
         has_business_params = "business.gemini.google" in current_url and "csesidx=" in current_url and "/cid/" in current_url
 
         if has_business_params:
-            self._log("info", "✅ 检测到已登录，直接提取配置")
+            self._log("info", "✅ 已登录，提取配置")
             return self._extract_config(page, email)
 
-        # Step 3: 点击发送验证码按钮
-        self._log("info", "🔘 正在查找并点击发送验证码按钮...")
-        if not self._click_send_code_button(page):
-            self._log("error", "❌ 未找到发送验证码按钮")
-            self._save_screenshot(page, "send_code_button_missing")
-            return {"success": False, "error": "send code button not found"}
+        # Step 3: 点击发送验证码按钮（最多5次，每次间隔10秒）
+        self._log("info", "📧 发送验证码...")
+        max_send_rounds = 5
+        send_round = 0
+        while True:
+            send_round += 1
+            if self._click_send_code_button(page):
+                break
+            if send_round >= max_send_rounds:
+                self._log("error", "❌ 验证码发送失败（可能触发风控），建议更换代理IP")
+                self._save_screenshot(page, "send_code_button_failed")
+                return {"success": False, "error": "send code failed after retries"}
+            self._log("warning", f"⚠️ 发送失败，10秒后重试 ({send_round}/{max_send_rounds})")
+            time.sleep(10)
 
         # Step 4: 等待验证码输入框出现
-        self._log("info", "⏳ 等待验证码输入框出现...")
         code_input = self._wait_for_code_input(page)
         if not code_input:
             self._log("error", "❌ 验证码输入框未出现")
             self._save_screenshot(page, "code_input_missing")
             return {"success": False, "error": "code input not found"}
 
-        # Step 5: 轮询邮件获取验证码（传入发送时间)
-        self._log("info", "📬 开始轮询邮箱获取验证码...")
-        code = mail_client.poll_for_code(timeout=40, interval=4, since_time=send_time)
+        # Step 5: 轮询邮件获取验证码（3次，每次5秒间隔）
+        self._log("info", "📬 等待邮箱验证码...")
+        code = mail_client.poll_for_code(timeout=15, interval=5, since_time=task_start_time)
 
         if not code:
-            self._log("warning", "⚠️ 验证码获取超时，尝试重新发送...")
-            # 更新发送时间（在点击按钮之前记录）
-            send_time = datetime.now()
+            self._log("warning", "⚠️ 验证码超时，15秒后重新发送...")
+            time.sleep(15)
             # 尝试点击重新发送按钮
             if self._click_resend_code_button(page):
-                self._log("info", "🔄 已点击重新发送按钮，等待新验证码...")
-                # 再次轮询验证码
-                code = mail_client.poll_for_code(timeout=40, interval=4, since_time=send_time)
+                # 再次轮询验证码（3次，每次5秒间隔）
+                code = mail_client.poll_for_code(timeout=15, interval=5, since_time=task_start_time)
                 if not code:
                     self._log("error", "❌ 重新发送后仍未收到验证码")
                     self._save_screenshot(page, "code_timeout_after_resend")
@@ -255,19 +271,19 @@ class GeminiAutomation:
             return {"success": False, "error": "code input expired"}
 
         # 尝试模拟人类输入，失败则降级到直接注入
-        self._log("info", "⌨️ 正在输入验证码 (模拟人类输入)...")
+        self._log("info", "⌨️ 输入验证码...")
         if not self._simulate_human_input(code_input, code):
             self._log("warning", "⚠️ 模拟输入失败，降级为直接输入")
             code_input.input(code, clear=True)
             time.sleep(0.5)
 
         # 直接使用回车提交，不再查找按钮
-        self._log("info", "⏎ 按下回车键提交验证码")
+        self._log("info", "⏎ 提交验证码")
         code_input.input("\n")
 
         # Step 7: 等待页面自动重定向（提交验证码后 Google 会自动跳转）
-        self._log("info", "⏳ 等待验证后自动跳转...")
-        time.sleep(12)  # 增加等待时间，让页面有足够时间完成重定向（如果网络慢可以继续增加）
+        self._log("info", "⏳ 等待验证后跳转...")
+        time.sleep(12)
 
         # 记录当前 URL 状态
         current_url = page.url
@@ -275,7 +291,7 @@ class GeminiAutomation:
 
         # 检查是否还停留在验证码页面（说明提交失败）
         if "verify-oob-code" in current_url:
-            self._log("error", "❌ 验证码提交失败，仍停留在验证页面")
+            self._log("error", "❌ 验证码提交失败")
             self._save_screenshot(page, "verification_submit_failed")
             return {"success": False, "error": "verification code submission failed"}
 
@@ -287,82 +303,259 @@ class GeminiAutomation:
         has_business_params = "business.gemini.google" in current_url and "csesidx=" in current_url and "/cid/" in current_url
 
         if has_business_params:
-            # 已经在正确的页面，不需要再次导航
-            self._log("info", "already on business page with parameters")
             return self._extract_config(page, email)
 
         # Step 10: 如果不在正确的页面，尝试导航
         if "business.gemini.google" not in current_url:
-            self._log("info", "navigating to business page")
             page.get("https://business.gemini.google/", timeout=self.timeout)
-            time.sleep(5)  # 增加等待时间
-            current_url = page.url
-            self._log("info", f"URL after navigation: {current_url}")
+            time.sleep(5)
 
         # Step 11: 检查是否需要设置用户名
         if "cid" not in page.url:
             if self._handle_username_setup(page):
-                time.sleep(5)  # 增加等待时间
+                time.sleep(5)
 
         # Step 12: 等待 URL 参数生成（csesidx 和 cid）
-        self._log("info", "waiting for URL parameters")
         if not self._wait_for_business_params(page):
-            self._log("warning", "URL parameters not generated, trying refresh")
             page.refresh()
-            time.sleep(5)  # 增加等待时间
+            time.sleep(5)
             if not self._wait_for_business_params(page):
-                self._log("error", "URL parameters generation failed")
-                current_url = page.url
-                self._log("error", f"final URL: {current_url}")
+                self._log("error", "❌ URL 参数生成失败")
                 self._save_screenshot(page, "params_missing")
                 return {"success": False, "error": "URL parameters not found"}
 
         # Step 13: 提取配置
-        self._log("info", "🎊 登录流程完成，正在提取配置...")
+        self._log("info", "🎊 登录成功，提取配置...")
         return self._extract_config(page, email)
 
     def _click_send_code_button(self, page) -> bool:
         """点击发送验证码按钮（如果需要）"""
         time.sleep(2)
+        max_send_attempts = 5
+        resend_delay_seconds = 10
 
         # 方法1: 直接通过ID查找
         direct_btn = page.ele("#sign-in-with-email", timeout=5)
         if direct_btn:
-            try:
-                direct_btn.click()
-                self._log("info", "✅ 找到并点击了发送验证码按钮 (ID: #sign-in-with-email)")
-                time.sleep(3)  # 等待发送请求
-                return True
-            except Exception as e:
-                self._log("warning", f"⚠️ 点击按钮失败: {e}")
+            for attempt in range(1, max_send_attempts + 1):
+                try:
+                    self._last_send_error = ""
+                    direct_btn.click()
+                    if self._verify_code_send_by_network(page) or self._verify_code_send_status(page):
+                        self._stop_listen(page)
+                        return True
+                    if self._last_send_error == "captcha_check_failed":
+                        self._log("error", f"❌ 触发风控，建议更换代理IP ({attempt}/{max_send_attempts})")
+                    else:
+                        self._log("warning", f"⚠️ 发送失败，{resend_delay_seconds}秒后重试 ({attempt}/{max_send_attempts})")
+                    time.sleep(resend_delay_seconds)
+                except Exception as e:
+                    self._log("warning", f"⚠️ 点击失败: {e}")
+            self._stop_listen(page)
+            return False
 
         # 方法2: 通过关键词查找
         keywords = ["通过电子邮件发送验证码", "通过电子邮件发送", "email", "Email", "Send code", "Send verification", "Verification code"]
         try:
-            self._log("info", f"🔍 通过关键词搜索按钮: {keywords}")
             buttons = page.eles("tag:button")
             for btn in buttons:
                 text = (btn.text or "").strip()
                 if text and any(kw in text for kw in keywords):
-                    try:
-                        self._log("info", f"✅ 找到匹配按钮: '{text}'")
-                        btn.click()
-                        self._log("info", "✅ 成功点击发送验证码按钮")
-                        time.sleep(3)  # 等待发送请求
-                        return True
-                    except Exception as e:
-                        self._log("warning", f"⚠️ 点击按钮失败: {e}")
+                    for attempt in range(1, max_send_attempts + 1):
+                        try:
+                            self._last_send_error = ""
+                            btn.click()
+                            if self._verify_code_send_by_network(page) or self._verify_code_send_status(page):
+                                self._stop_listen(page)
+                                return True
+                            if self._last_send_error == "captcha_check_failed":
+                                self._log("error", f"❌ 触发风控，建议更换代理IP ({attempt}/{max_send_attempts})")
+                            else:
+                                self._log("warning", f"⚠️ 发送失败，{resend_delay_seconds}秒后重试 ({attempt}/{max_send_attempts})")
+                            time.sleep(resend_delay_seconds)
+                        except Exception as e:
+                            self._log("warning", f"⚠️ 点击失败: {e}")
+                    self._stop_listen(page)
+                    return False
         except Exception as e:
             self._log("warning", f"⚠️ 搜索按钮异常: {e}")
 
         # 检查是否已经在验证码输入页面
         code_input = page.ele("css:input[jsname='ovqh0b']", timeout=2) or page.ele("css:input[name='pinInput']", timeout=1)
         if code_input:
-            self._log("info", "✅ 已在验证码输入页面，无需点击按钮")
-            return True
+            self._stop_listen(page)
+            self._log("info", "✅ 已在验证码输入页面")
 
+            # 直接点击重新发送按钮（不管之前是否发送过）
+            if self._click_resend_code_button(page):
+                self._log("info", "✅ 已点击重新发送按钮")
+                return True
+            else:
+                self._log("warning", "⚠️ 未找到重新发送按钮，继续流程")
+                return True
+
+        self._stop_listen(page)
         self._log("error", "❌ 未找到发送验证码按钮")
         return False
+
+    def _stop_listen(self, page) -> None:
+        """安全地停止网络监听"""
+        try:
+            if hasattr(page, 'listen') and page.listen:
+                page.listen.stop()
+        except Exception:
+            pass
+
+    def _verify_code_send_by_network(self, page) -> bool:
+        """通过监听网络请求验证验证码是否成功发送"""
+        try:
+            time.sleep(1)
+
+            packets = []
+            max_wait_seconds = 6
+            deadline = time.time() + max_wait_seconds
+            try:
+                while time.time() < deadline:
+                    got_any = False
+                    for packet in page.listen.steps(timeout=1, gap=1):
+                        packets.append(packet)
+                        got_any = True
+                    if got_any:
+                        time.sleep(0.2)
+                    else:
+                        break
+            except Exception:
+                return False
+
+            if not packets:
+                return False
+
+            # 保存网络日志（仅用于调试）
+            self._save_network_packets(packets)
+
+            found_batchexecute = False
+            found_batchexecute_error = False
+
+            for packet in packets:
+                try:
+                    url = str(packet.url) if hasattr(packet, 'url') else str(packet)
+
+                    if 'batchexecute' in url:
+                        found_batchexecute = True
+
+                        try:
+                            response = packet.response if hasattr(packet, 'response') else None
+                            if response and hasattr(response, 'raw_body'):
+                                body = response.raw_body
+                                raw_body_str = str(body)
+                                if "CAPTCHA_CHECK_FAILED" in raw_body_str:
+                                    found_batchexecute_error = True
+                                    self._last_send_error = "captcha_check_failed"
+                                elif "SendEmailOtpError" in raw_body_str:
+                                    found_batchexecute_error = True
+                                    self._last_send_error = "send_email_otp_error"
+                        except Exception:
+                            pass
+
+                except Exception:
+                    continue
+
+            if found_batchexecute:
+                if found_batchexecute_error:
+                    return False
+                return True
+            else:
+                return False
+
+        except Exception:
+            return False
+
+    def _verify_code_send_status(self, page) -> bool:
+        """检测页面提示判断是否发送成功"""
+        time.sleep(2)
+        try:
+            success_keywords = ["验证码已发送", "code sent", "email sent", "check your email", "已发送"]
+            error_keywords = [
+                "出了点问题",
+                "something went wrong",
+                "error",
+                "failed",
+                "try again",
+                "稍后再试",
+                "选择其他登录方法"
+            ]
+            selectors = [
+                "css:.zyTWof-gIZMF",
+                "css:[role='alert']",
+                "css:aside",
+            ]
+            for selector in selectors:
+                try:
+                    elements = page.eles(selector, timeout=1)
+                    for elem in elements[:20]:
+                        text = (elem.text or "").strip()
+                        if not text:
+                            continue
+                        if any(kw in text for kw in error_keywords):
+                            return False
+                        if any(kw in text for kw in success_keywords):
+                            return True
+                except Exception:
+                    continue
+            return True
+        except Exception:
+            return True
+
+    def _truncate_text(self, text: str, max_len: int = 2000) -> str:
+        if text is None:
+            return ""
+        if len(text) <= max_len:
+            return text
+        return text[:max_len] + f"...(truncated, total={len(text)})"
+
+    def _save_network_packets(self, packets) -> None:
+        """保存网络日志（仅用于调试）"""
+        try:
+            from core.storage import _data_file_path
+            base_dir = _data_file_path(os.path.join("logs", "network"))
+            os.makedirs(base_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            file_path = os.path.join(base_dir, f"network-{ts}.jsonl")
+
+            def safe_str(value):
+                try:
+                    return value if isinstance(value, str) else str(value)
+                except Exception:
+                    return "<unprintable>"
+
+            with open(file_path, "a", encoding="utf-8") as f:
+                for packet in packets:
+                    try:
+                        req = packet.request if hasattr(packet, "request") else None
+                        resp = packet.response if hasattr(packet, "response") else None
+                        fail = packet.fail_info if hasattr(packet, "fail_info") else None
+
+                        item = {
+                            "url": safe_str(packet.url) if hasattr(packet, "url") else safe_str(packet),
+                            "method": safe_str(packet.method) if hasattr(packet, "method") else "UNKNOWN",
+                            "resourceType": safe_str(packet.resourceType) if hasattr(packet, "resourceType") else "",
+                            "is_failed": bool(packet.is_failed) if hasattr(packet, "is_failed") else False,
+                            "fail_info": safe_str(fail) if fail else "",
+                            "request": {
+                                "headers": req.headers if req and hasattr(req, "headers") else {},
+                                "postData": req.postData if req and hasattr(req, "postData") else "",
+                            },
+                            "response": {
+                                "status": resp.status if resp and hasattr(resp, "status") else 0,
+                                "headers": resp.headers if resp and hasattr(resp, "headers") else {},
+                                "raw_body": resp.raw_body if resp and hasattr(resp, "raw_body") else "",
+                            },
+                        }
+                        f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                    except Exception as e:
+                        f.write(json.dumps({"error": safe_str(e)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     def _wait_for_code_input(self, page, timeout: int = 30):
         """等待验证码输入框出现"""
@@ -406,10 +599,8 @@ class GeminiAutomation:
 
             # 输入完成后短暂停顿
             time.sleep(random.uniform(0.2, 0.5))
-            self._log("info", "simulated human input successfully")
             return True
-        except Exception as e:
-            self._log("warning", f"simulated input failed: {e}")
+        except Exception:
             return False
 
     def _find_verify_button(self, page):
@@ -435,7 +626,7 @@ class GeminiAutomation:
                 text = (btn.text or "").strip().lower()
                 if text and ("重新" in text or "resend" in text):
                     try:
-                        self._log("info", f"found resend button: {text}")
+                        self._log("info", f"🔄 点击重新发送按钮")
                         btn.click()
                         time.sleep(2)
                         return True
@@ -467,7 +658,6 @@ class GeminiAutomation:
         for _ in range(timeout):
             url = page.url
             if "csesidx=" in url and "/cid/" in url:
-                self._log("info", f"business params ready: {url}")
                 return True
             time.sleep(1)
         return False
@@ -510,7 +700,6 @@ class GeminiAutomation:
 
             # 尝试模拟人类输入，失败则降级到直接注入
             if not self._simulate_human_input(username_input, username):
-                self._log("warning", "simulated username input failed, fallback to direct input")
                 username_input.input(username)
                 time.sleep(0.3)
 
@@ -575,8 +764,8 @@ class GeminiAutomation:
     def _save_screenshot(self, page, name: str) -> None:
         """保存截图"""
         try:
-            import os
-            screenshot_dir = os.path.join("data", "automation")
+            from core.storage import _data_file_path
+            screenshot_dir = _data_file_path("automation")
             os.makedirs(screenshot_dir, exist_ok=True)
             path = os.path.join(screenshot_dir, f"{name}_{int(time.time())}.png")
             page.get_screenshot(path=path)

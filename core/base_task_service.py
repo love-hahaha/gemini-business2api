@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Any, Awaitable, Callable, Deque, Dict, Generic, List, Optional, TypeVar
 from collections import deque
 
-from core.account import update_accounts_config
+from core.account import RetryPolicy, update_accounts_config
 
 logger = logging.getLogger("gemini.base_task")
 
@@ -78,8 +78,7 @@ class BaseTaskService(Generic[T]):
         multi_account_mgr,
         http_client,
         user_agent: str,
-        account_failure_threshold: int,
-        rate_limit_cooldown_seconds: int,
+        retry_policy: RetryPolicy,
         session_cache_ttl_seconds: int,
         global_stats_provider: Callable[[], dict],
         set_multi_account_mgr: Optional[Callable[[Any], None]] = None,
@@ -92,8 +91,7 @@ class BaseTaskService(Generic[T]):
             multi_account_mgr: 多账户管理器
             http_client: HTTP客户端
             user_agent: 用户代理
-            account_failure_threshold: 账户失败阈值
-            rate_limit_cooldown_seconds: 速率限制冷却秒数
+            retry_policy: 重试策略
             session_cache_ttl_seconds: 会话缓存TTL秒数
             global_stats_provider: 全局统计提供者
             set_multi_account_mgr: 设置多账户管理器的回调
@@ -115,8 +113,7 @@ class BaseTaskService(Generic[T]):
         self.multi_account_mgr = multi_account_mgr
         self.http_client = http_client
         self.user_agent = user_agent
-        self.account_failure_threshold = account_failure_threshold
-        self.rate_limit_cooldown_seconds = rate_limit_cooldown_seconds
+        self.retry_policy = retry_policy
         self.session_cache_ttl_seconds = session_cache_ttl_seconds
         self.global_stats_provider = global_stats_provider
         self.set_multi_account_mgr = set_multi_account_mgr
@@ -332,8 +329,7 @@ class BaseTaskService(Generic[T]):
             self.multi_account_mgr,
             self.http_client,
             self.user_agent,
-            self.account_failure_threshold,
-            self.rate_limit_cooldown_seconds,
+            self.retry_policy,
             self.session_cache_ttl_seconds,
             global_stats,
         )

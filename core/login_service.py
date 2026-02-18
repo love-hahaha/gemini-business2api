@@ -12,8 +12,8 @@ from core.base_task_service import BaseTask, BaseTaskService, TaskCancelledError
 from core.config import config
 from core.mail_providers import create_temp_mail_client
 from core.gemini_automation import GeminiAutomation
-from core.gemini_automation_uc import GeminiAutomationUC
 from core.microsoft_mail_client import MicrosoftMailClient
+from core.proxy_utils import parse_proxy_setting
 
 logger = logging.getLogger("gemini.login")
 
@@ -34,15 +34,14 @@ class LoginTask(BaseTask):
 
 
 class LoginService(BaseTaskService[LoginTask]):
-    """登录服务类"""
+    """登录服务类 - 统一任务管理"""
 
     def __init__(
         self,
         multi_account_mgr,
         http_client,
         user_agent: str,
-        account_failure_threshold: int,
-        rate_limit_cooldown_seconds: int,
+        retry_policy,
         session_cache_ttl_seconds: int,
         global_stats_provider: Callable[[], dict],
         set_multi_account_mgr: Optional[Callable[[Any], None]] = None,
@@ -51,8 +50,7 @@ class LoginService(BaseTaskService[LoginTask]):
             multi_account_mgr,
             http_client,
             user_agent,
-            account_failure_threshold,
-            rate_limit_cooldown_seconds,
+            retry_policy,
             session_cache_ttl_seconds,
             global_stats_provider,
             set_multi_account_mgr,
@@ -60,24 +58,61 @@ class LoginService(BaseTaskService[LoginTask]):
         )
         self._is_polling = False
 
-    async def start_login(self, account_ids: List[str]) -> LoginTask:
-        """启动登录任务（支持排队）。"""
-        async with self._lock:
-            # 去重：同一批账号的 pending/running 任务直接复用
-            normalized = list(account_ids or [])
-            for existing in self._tasks.values():
-                if (
-                    isinstance(existing, LoginTask)
-                    and existing.account_ids == normalized
-                    and existing.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
-                ):
-                    return existing
+    def _get_running_task(self) -> Optional[LoginTask]:
+        """获取正在运行或等待中的任务"""
+        for task in self._tasks.values():
+            if isinstance(task, LoginTask) and task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                return task
+        return None
 
-            task = LoginTask(id=str(uuid.uuid4()), account_ids=normalized)
+    async def start_login(self, account_ids: List[str]) -> LoginTask:
+        """
+        启动登录任务 - 统一任务管理
+        - 如果有正在运行的任务，将新账户添加到该任务（去重）
+        - 如果没有正在运行的任务，创建新任务
+        """
+        async with self._lock:
+            if not account_ids:
+                raise ValueError("账户列表不能为空")
+
+            # 检查是否有正在运行的任务
+            running_task = self._get_running_task()
+
+            if running_task:
+                # 将新账户添加到现有任务（去重）
+                new_accounts = [aid for aid in account_ids if aid not in running_task.account_ids]
+
+                if new_accounts:
+                    running_task.account_ids.extend(new_accounts)
+                    self._append_log(
+                        running_task,
+                        "info",
+                        f"📝 添加 {len(new_accounts)} 个账户到现有任务 (总计: {len(running_task.account_ids)})"
+                    )
+                else:
+                    self._append_log(running_task, "info", "📝 所有账户已在当前任务中")
+
+                return running_task
+
+            # 创建新任务
+            task = LoginTask(id=str(uuid.uuid4()), account_ids=list(account_ids))
             self._tasks[task.id] = task
             self._append_log(task, "info", f"📝 创建刷新任务 (账号数量: {len(task.account_ids)})")
-            await self._enqueue_task(task)
+
+            # 直接启动任务
+            self._current_task_id = task.id
+            asyncio.create_task(self._run_task_directly(task))
             return task
+
+    async def _run_task_directly(self, task: LoginTask) -> None:
+        """直接执行任务"""
+        try:
+            await self._run_one_task(task)
+        finally:
+            # 任务完成后清理
+            async with self._lock:
+                if self._current_task_id == task.id:
+                    self._current_task_id = None
 
     def _execute_task(self, task: LoginTask):
         return self._run_login_async(task)
@@ -156,6 +191,7 @@ class LoginService(BaseTaskService[LoginTask]):
         mail_client_id = account.get("mail_client_id")
         mail_refresh_token = account.get("mail_refresh_token")
         mail_tenant = account.get("mail_tenant") or "consumers"
+        proxy_for_auth, _ = parse_proxy_setting(config.basic.proxy_for_auth)
 
         def log_cb(level, message):
             self._append_log(task, level, f"[{account_id}] {message}")
@@ -171,7 +207,7 @@ class LoginService(BaseTaskService[LoginTask]):
                 client_id=mail_client_id,
                 refresh_token=mail_refresh_token,
                 tenant=mail_tenant,
-                proxy=config.basic.proxy_for_auth,
+                proxy=proxy_for_auth,
                 log_callback=log_cb,
             )
             client.set_credentials(mail_address)
@@ -210,31 +246,16 @@ class LoginService(BaseTaskService[LoginTask]):
         else:
             return {"success": False, "email": account_id, "error": f"不支持的邮件提供商: {mail_provider}"}
 
-        # 根据配置选择浏览器引擎
-        browser_engine = (config.basic.browser_engine or "dp").lower()
         headless = config.basic.browser_headless
 
-        log_cb("info", f"🌐 启动浏览器 (引擎={browser_engine}, 无头模式={headless})...")
+        log_cb("info", f"🌐 启动浏览器 (无头模式={headless})...")
 
-        if browser_engine == "dp":
-            # DrissionPage 引擎：支持有头和无头模式
-            automation = GeminiAutomation(
-                user_agent=self.user_agent,
-                proxy=config.basic.proxy_for_auth,
-                headless=headless,
-                log_callback=log_cb,
-            )
-        else:
-            # undetected-chromedriver 引擎：无头模式反检测能力弱，强制使用有头模式
-            if headless:
-                log_cb("warning", "⚠️ UC 引擎无头模式反检测能力弱，强制使用有头模式")
-                headless = False
-            automation = GeminiAutomationUC(
-                user_agent=self.user_agent,
-                proxy=config.basic.proxy_for_auth,
-                headless=headless,
-                log_callback=log_cb,
-            )
+        automation = GeminiAutomation(
+            user_agent=self.user_agent,
+            proxy=proxy_for_auth,
+            headless=headless,
+            log_callback=log_cb,
+        )
         # 允许外部取消时立刻关闭浏览器
         self._add_cancel_hook(task.id, lambda: getattr(automation, "stop", lambda: None)())
         try:
@@ -270,17 +291,30 @@ class LoginService(BaseTaskService[LoginTask]):
                 break
 
         self._apply_accounts_update(accounts)
+
+        # 清除该账户的所有冷却状态（重新登录后恢复可用）
+        if account_id in self.multi_account_mgr.accounts:
+            account_mgr = self.multi_account_mgr.accounts[account_id]
+            account_mgr.quota_cooldowns.clear()  # 清除配额冷却
+            account_mgr.is_available = True  # 恢复可用状态
+            log_cb("info", "✅ 已清除账户冷却状态")
+
         log_cb("info", "✅ 配置已保存到数据库")
         return {"success": True, "email": account_id, "config": config_data}
 
 
     def _get_expiring_accounts(self) -> List[str]:
+        """获取即将过期的账户列表"""
         accounts = load_accounts_from_source()
         expiring = []
         beijing_tz = timezone(timedelta(hours=8))
         now = datetime.now(beijing_tz)
 
         for account in accounts:
+            account_id = account.get("id")
+            if not account_id:
+                continue
+
             if account.get("disabled"):
                 continue
             mail_provider = (account.get("mail_provider") or "").lower()
@@ -317,7 +351,7 @@ class LoginService(BaseTaskService[LoginTask]):
                 continue
 
             if remaining <= config.basic.refresh_window_hours:
-                expiring.append(account.get("id"))
+                expiring.append(account_id)
 
         return expiring
 

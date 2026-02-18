@@ -44,7 +44,7 @@ def _parse_bool(value, default: bool) -> bool:
 
 class BasicConfig(BaseModel):
     """基础配置"""
-    api_key: str = Field(default="", description="API访问密钥（留空则公开访问）")
+    api_key: str = Field(default="", description="API访问密钥（留空则公开访问，多个密钥用逗号分隔）")
     base_url: str = Field(default="", description="服务器URL（留空则自动检测）")
     proxy_for_auth: str = Field(default="", description="账户操作代理地址（注册/登录/刷新，留空则不使用代理）")
     proxy_for_chat: str = Field(default="", description="对话操作代理地址（JWT/会话/消息，留空则不使用代理）")
@@ -61,10 +61,10 @@ class BasicConfig(BaseModel):
     freemail_domain: str = Field(default="", description="Freemail 邮箱域名（可选，留空则随机选择）")
     mail_proxy_enabled: bool = Field(default=False, description="是否启用临时邮箱代理（使用账户操作代理）")
     gptmail_base_url: str = Field(default="https://mail.chatgpt.org.uk", description="GPTMail API地址")
-    gptmail_api_key: str = Field(default="", description="GPTMail API key")
+    gptmail_api_key: str = Field(default="gpt-test", description="GPTMail API key")
     gptmail_verify_ssl: bool = Field(default=True, description="GPTMail SSL校验")
     gptmail_domain: str = Field(default="", description="GPTMail 邮箱域名（可选，留空则随机选择）")
-    browser_engine: str = Field(default="dp", description="浏览器引擎：uc 或 dp")
+    browser_engine: str = Field(default="dp", description="浏览器引擎")
     browser_headless: bool = Field(default=False, description="自动化浏览器无头模式")
     refresh_window_hours: int = Field(default=1, ge=0, le=24, description="过期刷新窗口（小时）")
     register_default_count: int = Field(default=1, ge=1, description="默认注册数量")
@@ -73,9 +73,9 @@ class BasicConfig(BaseModel):
 
 class ImageGenerationConfig(BaseModel):
     """图片生成配置"""
-    enabled: bool = Field(default=True, description="是否启用图片生成")
+    enabled: bool = Field(default=False, description="是否启用图片生成")
     supported_models: List[str] = Field(
-        default=["gemini-3-pro-preview"],
+        default=[],
         description="支持图片生成的模型列表"
     )
     output_format: str = Field(default="base64", description="图片输出格式：base64 或 url")
@@ -95,17 +95,16 @@ class VideoGenerationConfig(BaseModel):
 
 class RetryConfig(BaseModel):
     """重试策略配置"""
-    max_new_session_tries: int = Field(default=5, ge=1, le=20, description="新会话尝试账户数")
-    max_request_retries: int = Field(default=3, ge=1, le=10, description="请求失败重试次数")
     max_account_switch_tries: int = Field(default=5, ge=1, le=20, description="账户切换尝试次数")
-    account_failure_threshold: int = Field(default=3, ge=1, le=10, description="账户失败阈值")
-    rate_limit_cooldown_seconds: int = Field(default=3600, ge=3600, le=43200, description="429冷却时间（秒）")
+    rate_limit_cooldown_seconds: int = Field(default=7200, ge=3600, le=43200, description="429冷却时间（秒）")
+    text_rate_limit_cooldown_seconds: int = Field(default=7200, ge=3600, le=86400, description="对话配额冷却（秒）")
+    images_rate_limit_cooldown_seconds: int = Field(default=14400, ge=3600, le=86400, description="绘图配额冷却（秒）")
+    videos_rate_limit_cooldown_seconds: int = Field(default=14400, ge=3600, le=86400, description="视频配额冷却（秒）")
     session_cache_ttl_seconds: int = Field(default=3600, ge=0, le=86400, description="会话缓存时间（秒，0表示禁用缓存）")
     auto_refresh_accounts_seconds: int = Field(default=60, ge=0, le=600, description="自动刷新账号间隔（秒，0禁用）")
     # 定时刷新配置
     scheduled_refresh_enabled: bool = Field(default=False, description="是否启用定时刷新任务")
     scheduled_refresh_interval_minutes: int = Field(default=30, ge=0, le=720, description="定时刷新检测间隔（分钟，0-12小时）")
-
 
 class PublicDisplayConfig(BaseModel):
     """公开展示配置"""
@@ -203,8 +202,8 @@ class ConfigManager:
             duckmail_base_url=basic_data.get("duckmail_base_url") or "https://api.duckmail.sbs",
             duckmail_api_key=str(duckmail_api_key_raw or "").strip(),
             duckmail_verify_ssl=_parse_bool(basic_data.get("duckmail_verify_ssl"), True),
-            temp_mail_provider=basic_data.get("temp_mail_provider") or "duckmail",
-            moemail_base_url=basic_data.get("moemail_base_url") or "https://moemail.app",
+            temp_mail_provider=basic_data.get("temp_mail_provider") or "moemail",
+            moemail_base_url=basic_data.get("moemail_base_url") or "https://moemail.nanohajimi.mom",
             moemail_api_key=str(basic_data.get("moemail_api_key") or "").strip(),
             moemail_domain=str(basic_data.get("moemail_domain") or "").strip(),
             freemail_base_url=basic_data.get("freemail_base_url") or "http://your-freemail-server.com",
@@ -215,6 +214,7 @@ class ConfigManager:
             gptmail_base_url=str(basic_data.get("gptmail_base_url") or "https://mail.chatgpt.org.uk").strip(),
             gptmail_api_key=str(basic_data.get("gptmail_api_key") or "").strip(),
             gptmail_verify_ssl=_parse_bool(basic_data.get("gptmail_verify_ssl"), True),
+            gptmail_domain=str(basic_data.get("gptmail_domain") or "").strip(),
             browser_engine=basic_data.get("browser_engine") or "dp",
             browser_headless=_parse_bool(basic_data.get("browser_headless"), False),
             refresh_window_hours=int(refresh_window_raw),
@@ -437,38 +437,37 @@ class ConfigManager:
         return self._config.session.expire_hours
 
     @property
-    def max_new_session_tries(self) -> int:
-        """新会话尝试账户数"""
-        return self._config.retry.max_new_session_tries
-
-    @property
-    def max_request_retries(self) -> int:
-        """请求失败重试次数"""
-        return self._config.retry.max_request_retries
-
-    @property
     def max_account_switch_tries(self) -> int:
         """账户切换尝试次数"""
         return self._config.retry.max_account_switch_tries
 
     @property
-    def account_failure_threshold(self) -> int:
-        """账户失败阈值"""
-        return self._config.retry.account_failure_threshold
-
-    @property
     def rate_limit_cooldown_seconds(self) -> int:
-        """429冷却时间（秒）"""
+        # 429 cooldown (seconds)
+        if hasattr(self._config.retry, 'text_rate_limit_cooldown_seconds'):
+            return self._config.retry.text_rate_limit_cooldown_seconds
         return self._config.retry.rate_limit_cooldown_seconds
 
     @property
+    def text_rate_limit_cooldown_seconds(self) -> int:
+        return self._config.retry.text_rate_limit_cooldown_seconds
+
+    @property
+    def images_rate_limit_cooldown_seconds(self) -> int:
+        return self._config.retry.images_rate_limit_cooldown_seconds
+
+    @property
+    def videos_rate_limit_cooldown_seconds(self) -> int:
+        return self._config.retry.videos_rate_limit_cooldown_seconds
+
+    @property
     def session_cache_ttl_seconds(self) -> int:
-        """会话缓存时间（秒）"""
+        # Session cache TTL (seconds)
         return self._config.retry.session_cache_ttl_seconds
 
     @property
     def auto_refresh_accounts_seconds(self) -> int:
-        """自动刷新账号间隔（秒，0禁用）"""
+        # Auto refresh accounts interval (seconds)
         return self._config.retry.auto_refresh_accounts_seconds
 
 

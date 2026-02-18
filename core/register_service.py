@@ -11,7 +11,7 @@ from core.base_task_service import BaseTask, BaseTaskService, TaskCancelledError
 from core.config import config
 from core.mail_providers import create_temp_mail_client
 from core.gemini_automation import GeminiAutomation
-from core.gemini_automation_uc import GeminiAutomationUC
+from core.proxy_utils import parse_proxy_setting
 
 logger = logging.getLogger("gemini.register")
 
@@ -40,8 +40,7 @@ class RegisterService(BaseTaskService[RegisterTask]):
         multi_account_mgr,
         http_client,
         user_agent: str,
-        account_failure_threshold: int,
-        rate_limit_cooldown_seconds: int,
+        retry_policy,
         session_cache_ttl_seconds: int,
         global_stats_provider: Callable[[], dict],
         set_multi_account_mgr: Optional[Callable[[Any], None]] = None,
@@ -50,24 +49,29 @@ class RegisterService(BaseTaskService[RegisterTask]):
             multi_account_mgr,
             http_client,
             user_agent,
-            account_failure_threshold,
-            rate_limit_cooldown_seconds,
+            retry_policy,
             session_cache_ttl_seconds,
             global_stats_provider,
             set_multi_account_mgr,
             log_prefix="REGISTER",
         )
 
+    def _get_running_task(self) -> Optional[RegisterTask]:
+        """获取正在运行或等待中的任务"""
+        for task in self._tasks.values():
+            if isinstance(task, RegisterTask) and task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                return task
+        return None
+
     async def start_register(self, count: Optional[int] = None, domain: Optional[str] = None, mail_provider: Optional[str] = None) -> RegisterTask:
-        """启动注册任务（支持排队）。"""
+        """
+        启动注册任务 - 统一任务管理
+        - 如果有正在运行的任务，将新数量添加到该任务
+        - 如果没有正在运行的任务，创建新任务
+        """
         async with self._lock:
             if os.environ.get("ACCOUNTS_CONFIG"):
-                raise ValueError("ACCOUNTS_CONFIG is set; register is disabled")
                 raise ValueError("已设置 ACCOUNTS_CONFIG 环境变量，注册功能已禁用")
-            if self._current_task_id:
-                current = self._tasks.get(self._current_task_id)
-                if current and current.status == TaskStatus.RUNNING:
-                    raise ValueError("已有注册任务正在运行中")
 
             # 先确定使用哪个邮箱服务提供商
             mail_provider_value = (mail_provider or "").strip().lower()
@@ -84,13 +88,39 @@ class RegisterService(BaseTaskService[RegisterTask]):
 
             register_count = count or config.basic.register_default_count
             register_count = max(1, int(register_count))
+
+            # 检查是否有正在运行的任务
+            running_task = self._get_running_task()
+
+            if running_task:
+                # 将新数量添加到现有任务
+                running_task.count += register_count
+                self._append_log(
+                    running_task,
+                    "info",
+                    f"📝 添加 {register_count} 个账户到现有任务 (总计: {running_task.count})"
+                )
+                return running_task
+
+            # 创建新任务
             task = RegisterTask(id=str(uuid.uuid4()), count=register_count, domain=domain_value, mail_provider=mail_provider_value)
             self._tasks[task.id] = task
-            # 将 domain 和 mail_provider 记录在日志里，便于排查
-            self._append_log(task, "info", f"register task queued (count={register_count}, domain={domain_value or 'default'}, provider={mail_provider_value})")
-            await self._enqueue_task(task)
-            self._append_log(task, "info", f"📝 创建注册任务 (数量={register_count})")
+            self._append_log(task, "info", f"📝 创建注册任务 (数量: {register_count}, 域名: {domain_value or 'default'}, 提供商: {mail_provider_value})")
+
+            # 直接启动任务
+            self._current_task_id = task.id
+            asyncio.create_task(self._run_task_directly(task))
             return task
+
+    async def _run_task_directly(self, task: RegisterTask) -> None:
+        """直接执行任务"""
+        try:
+            await self._run_one_task(task)
+        finally:
+            # 任务完成后清理
+            async with self._lock:
+                if self._current_task_id == task.id:
+                    self._current_task_id = None
 
     def _execute_task(self, task: RegisterTask):
         return self._run_register_async(task, task.domain, task.mail_provider)
@@ -167,31 +197,17 @@ class RegisterService(BaseTaskService[RegisterTask]):
 
         log_cb("info", f"✅ 邮箱注册成功: {client.email}")
 
-        # 根据配置选择浏览器引擎
-        browser_engine = (config.basic.browser_engine or "dp").lower()
         headless = config.basic.browser_headless
+        proxy_for_auth, _ = parse_proxy_setting(config.basic.proxy_for_auth)
 
-        log_cb("info", f"🌐 步骤 2/3: 启动浏览器 (引擎={browser_engine}, 无头模式={headless})...")
+        log_cb("info", f"🌐 步骤 2/3: 启动浏览器 (无头模式={headless})...")
 
-        if browser_engine == "dp":
-            # DrissionPage 引擎：支持有头和无头模式
-            automation = GeminiAutomation(
-                user_agent=self.user_agent,
-                proxy=config.basic.proxy_for_auth,
-                headless=headless,
-                log_callback=log_cb,
-            )
-        else:
-            # undetected-chromedriver 引擎：无头模式反检测能力弱，强制使用有头模式
-            if headless:
-                log_cb("warning", "⚠️ UC 引擎无头模式反检测能力弱，强制使用有头模式")
-                headless = False
-            automation = GeminiAutomationUC(
-                user_agent=self.user_agent,
-                proxy=config.basic.proxy_for_auth,
-                headless=headless,
-                log_callback=log_cb,
-            )
+        automation = GeminiAutomation(
+            user_agent=self.user_agent,
+            proxy=proxy_for_auth,
+            headless=headless,
+            log_callback=log_cb,
+        )
         # 允许外部取消时立刻关闭浏览器
         self._add_cancel_hook(task.id, lambda: getattr(automation, "stop", lambda: None)())
 
