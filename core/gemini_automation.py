@@ -643,13 +643,46 @@ class GeminiAutomation:
 
         return False
 
-    def _handle_agreement_page(self, page) -> None:
-        """处理协议页面"""
-        if "/admin/create" in page.url:
-            agree_btn = page.ele("css:button.agree-button", timeout=5)
-            if agree_btn:
-                agree_btn.click()
+def _handle_agreement_page(self, page) -> None:
+    """处理协议/创建页面"""
+    if "/admin/create" not in page.url:
+        return
+
+    self._log("info", "🧩 检测到 admin/create 页面，尝试自动点击...")
+
+    # 1) 优先使用原项目的 agree-button
+    try:
+        agree_btn = page.ele("css:button.agree-button", timeout=3)
+        if agree_btn:
+            agree_btn.click()
+            time.sleep(2)
+            self._log("info", "✅ 点击 agree-button")
+            return
+    except Exception:
+        pass
+
+    # 2) 兼容：勾选可能的 checkbox
+    try:
+        for cb in page.eles("css:input[type='checkbox']"):
+            try:
+                cb.click()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 3) 关键词按钮兜底
+    keywords = ["同意", "继续", "开始", "创建", "accept", "agree", "continue", "get started", "next", "confirm", "save"]
+    try:
+        for btn in page.eles("tag:button"):
+            text = (btn.text or "").strip().lower()
+            if any(kw.lower() in text for kw in keywords):
+                btn.click()
+                self._log("info", f"✅ 点击按钮: {btn.text}")
                 time.sleep(2)
+                return
+    except Exception:
+        pass
 
     def _wait_for_cid(self, page, timeout: int = 10) -> bool:
         """等待URL包含cid"""
