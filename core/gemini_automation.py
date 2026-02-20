@@ -282,20 +282,18 @@ class GeminiAutomation:
         code_input.input("\n")
 
         # Step 7: 等待页面自动重定向（提交验证码后 Google 会自动跳转）
-self._log("info", "⏳ 等待验证后跳转...")
-for _ in range(60):  # 最多等待 60 秒
-    url = page.url
-    # 如果已经跳到业务页并有参数，直接成功
-    if "csesidx=" in url and "/cid/" in url:
-        return self._extract_config(page, email)
-    # 如果跳到 auth 登录页，就先退出等待
-    if "auth.business.gemini.google/login" in url:
-        break
-    time.sleep(1)
+        self._log("info", "⏳ 等待验证后跳转...")
+        for _ in range(60):  # 最多等待 60 秒
+            url = page.url
+            if "csesidx=" in url and "/cid/" in url:
+                return self._extract_config(page, email)
+            if "auth.business.gemini.google/login" in url:
+                break
+            time.sleep(1)
 
-# 记录当前 URL 状态
-current_url = page.url
-self._log("info", f"📍 验证后 URL: {current_url}")
+        # 记录当前 URL 状态
+        current_url = page.url
+        self._log("info", f"📍 验证后 URL: {current_url}")
 
         # 检查是否还停留在验证码页面（说明提交失败）
         if "verify-oob-code" in current_url:
